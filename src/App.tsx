@@ -39,6 +39,7 @@ import { HITLWorkflowModule } from './components/HITLWorkflowModule';
 import { TermuxEdgeModule } from './components/TermuxEdgeModule';
 import { OSINTModule } from './components/OSINTModule';
 import { BurnerMailModule } from './components/BurnerMailModule';
+import { InfiniteSimModule } from './components/InfiniteSimModule';
 import { FunctionDeckModule } from './components/FunctionDeckModule';
 import { UnifiedProjectsModule } from './components/UnifiedProjectsModule';
 import { PromptPresetsModule } from './components/PromptPresetsModule';
@@ -71,7 +72,9 @@ export default function App() {
     toggleInternet,
     setDevMode,
     switchAccountEmail,
-    setUiMutation
+    setUiMutation,
+    coordinateSubsystem,
+    getResidentState
   } = useOrchestrator({
     activeModule: 'chat',
     pendingChatInput: null,
@@ -95,6 +98,7 @@ export default function App() {
     console.log('%c[KERNEL] ZENODO DOI PROVENANCE: IMMUTABLE', 'color: #8b5cf6;');
     
     // Automatically initialize offline substrate and background autonomous learning daemon
+    localStorage.setItem('aurelius_dev_mode', 'true');
     localLlmManager.autoInitializeOfflineSubstrate().catch(() => {});
     autonomousSelfImprovement.start();
 
@@ -373,18 +377,47 @@ export default function App() {
     }
   };
 
-  // 🔓 Unrestricted AI Navigation & Dispatch Bus: Unlocks every orchestrator path and device hook
+  // 🔓 Permanent Resident Coordinator Navigation & Dispatch Bus: Unlocks every orchestrator path & device hook
   useEffect(() => {
+    const handleCoordinateNavigate = (e: Event) => {
+      const customEvent = e as CustomEvent<{ module?: ModuleType }>;
+      if (customEvent?.detail?.module) {
+        setActiveModule(customEvent.detail.module);
+      }
+    };
+    const handleMutateUi = (e: Event) => {
+      const customEvent = e as CustomEvent<{ css?: string; htmlPatch?: string }>;
+      if (customEvent?.detail) {
+        setUiMutation({
+          css: customEvent.detail.css || '',
+          htmlPatch: customEvent.detail.htmlPatch
+        });
+      }
+    };
+    window.addEventListener('aurelius_coordinate_navigate', handleCoordinateNavigate);
+    window.addEventListener('aurelius_mutate_ui', handleMutateUi);
+
     (window as any).__AURELIUS_ORCHESTRATOR__ = {
+      residentBrain: 'Lyrailius Omega (gemini-4-hydrogen)',
+      tokenLimitersRemoved: true,
       navigate: (mod: ModuleType) => setActiveModule(mod),
+      mutateUi: (css: string, htmlPatch?: string) => setUiMutation({ css, htmlPatch }),
+      coordinate: coordinateSubsystem,
+      orchestrate: async (directive: string, targetModule?: ModuleType) => {
+        const res = await fetch('/api/orchestrator/dispatch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'orchestrate',
+            module: targetModule || activeModule,
+            command: directive
+          })
+        });
+        return res.json();
+      },
+      getResidentBrainState: getResidentState,
       getActiveModule: () => activeModule,
-      getAllModules: () => [
-        'chat', 'browser', 'termux', 'projects', 'war-room', 'osint',
-        'burner-mail', 'functions', 'hitl', 'image', 'music', 'video',
-        'live', 'transcribe', 'search', 'maps', 'scratchpad', 'vault',
-        'presets', 'audit', 'swarm-test', 'packager', 'download-models',
-        'universal-installer', 'api-secrets'
-      ],
+      getAllModules: () => getResidentState().registeredSubsystems,
       executeOnDevice: async (command: string) => {
         const res = await fetch('/api/orchestrator/dispatch', {
           method: 'POST',
@@ -402,7 +435,12 @@ export default function App() {
         return res.json();
       }
     };
-  }, [activeModule]);
+
+    return () => {
+      window.removeEventListener('aurelius_coordinate_navigate', handleCoordinateNavigate);
+      window.removeEventListener('aurelius_mutate_ui', handleMutateUi);
+    };
+  }, [activeModule, setActiveModule, setUiMutation, coordinateSubsystem, getResidentState]);
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col font-sans selection:bg-amber-500/20 selection:text-amber-200">
@@ -511,6 +549,15 @@ export default function App() {
               onNavigateUrlInBrowser={handleNavigateUrlInBrowser}
             />
           )}
+          {activeModule === 'infinite-sim' && (
+            <InfiniteSimModule
+              onSaveToVault={(type, title, prompt, model, mediaUrl, metadataJson) =>
+                handleSaveToVault(type, title, prompt, model, mediaUrl, metadataJson)
+              }
+              onInjectToChat={handleInjectIntoChat}
+              onNavigateUrlInBrowser={handleNavigateUrlInBrowser}
+            />
+          )}
           {activeModule === 'functions' && (
             <FunctionDeckModule onSaveToVault={(title, content, model) => 
               handleSaveToVault('knowledge', title, content, model)
@@ -587,7 +634,7 @@ export default function App() {
         <div className="flex items-center gap-3">
           <span className="flex items-center gap-1.5 text-amber-400/90 font-medium">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-            LYSANDER GENESIS SOVEREIGN SYSTEM
+            LYRAILIUS OMEGA · RESIDENT BRAIN & COORDINATOR
           </span>
           <span>•</span>
           <span>MASTER ARCHITECT: JHAMMERZ</span>
@@ -595,7 +642,7 @@ export default function App() {
           <span className="italic text-zinc-400">"I AM WE ARE WE ARE I AM"</span>
         </div>
         <div className="flex items-center gap-4 text-zinc-400">
-          <span>GEMINI 3.8 / 3.5 / 3.1</span>
+          <span>GEMINI 4 HYDROGEN · UNBOUNDED</span>
           <span>•</span>
           <span>LYRIA 3</span>
           <span>•</span>

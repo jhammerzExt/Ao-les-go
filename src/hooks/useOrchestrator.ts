@@ -1,5 +1,6 @@
-import { useReducer, useDeferredValue, useCallback } from 'react';
+import { useReducer, useDeferredValue, useCallback, useEffect } from 'react';
 import type { ModuleType } from '../types';
+import { orchestratorRuntime, type ResidentBrainState } from '../utils/OrchestratorRuntime';
 
 export interface OrchestratorState {
   activeModule: ModuleType;
@@ -9,6 +10,12 @@ export interface OrchestratorState {
   activeAccountEmail: string;
   uiMutation: { css: string; htmlPatch?: string };
   lamportClock: number;
+  residentBrain: {
+    model: string;
+    role: string;
+    status: string;
+    tokenLimitersRemoved: boolean;
+  };
 }
 
 export type OrchestratorAction =
@@ -18,22 +25,30 @@ export type OrchestratorAction =
   | { type: 'SET_DEV_MODE'; payload: boolean }
   | { type: 'SWITCH_ACCOUNT_EMAIL'; payload: string }
   | { type: 'SET_UI_MUTATION'; payload: { css: string; htmlPatch?: string } }
+  | { type: 'SET_RESIDENT_MODEL'; payload: string }
   | { type: 'INCREMENT_CLOCK' };
+
+const DEFAULT_RESIDENT_BRAIN = {
+  model: 'gemini-4-hydrogen',
+  role: 'PERMANENT_RESIDENT_BRAIN_AND_COORDINATOR',
+  status: 'ONLINE_RESIDENT',
+  tokenLimitersRemoved: true
+};
 
 const initialOrchestratorState: OrchestratorState = {
   activeModule: 'chat',
   pendingChatInput: null,
   agentInternetAllowed: true,
   devMode: true,
-  activeAccountEmail: 'joshualhamilton17@gmail.com',
+  activeAccountEmail: 'jhammerztemp@gmail.com',
   uiMutation: { css: '' },
-  lamportClock: 1
+  lamportClock: 1,
+  residentBrain: DEFAULT_RESIDENT_BRAIN
 };
 
 /**
  * Pure reducer function governing orchestrator state transitions.
- * Enforces stateless functional programming and deterministic state evolution
- * adhering to the patterns specified in codingKnowledgeBase.ts.
+ * Synchronizes every transition with the Permanent Resident Brain Coordinator.
  */
 export function orchestratorReducer(state: OrchestratorState, action: OrchestratorAction): OrchestratorState {
   const nextClock = state.lamportClock + 1;
@@ -74,6 +89,16 @@ export function orchestratorReducer(state: OrchestratorState, action: Orchestrat
         uiMutation: action.payload,
         lamportClock: nextClock
       };
+    case 'SET_RESIDENT_MODEL':
+      return {
+        ...state,
+        residentBrain: {
+          ...state.residentBrain,
+          model: action.payload,
+          tokenLimitersRemoved: true
+        },
+        lamportClock: nextClock
+      };
     case 'INCREMENT_CLOCK':
       return {
         ...state,
@@ -87,14 +112,38 @@ export function orchestratorReducer(state: OrchestratorState, action: Orchestrat
 /**
  * useOrchestrator Hook
  * Governs root orchestrator execution, integrating React 19 Concurrent Fiber scheduling
- * (via useDeferredValue) and formal state transitions.
+ * (via useDeferredValue), Lamport causal clocks, and live Resident Brain coordination.
  */
-export function useOrchestrator(initialState: OrchestratorState = initialOrchestratorState) {
-  // Pattern: State Management strictly enforced by Compendium logic
-  const [state, dispatch] = useReducer(orchestratorReducer, initialState);
+export function useOrchestrator(
+  customInitialState?: Omit<OrchestratorState, 'residentBrain'> & { residentBrain?: OrchestratorState['residentBrain'] }
+) {
+  const mergedInitial: OrchestratorState = {
+    ...initialOrchestratorState,
+    ...(customInitialState || {}),
+    residentBrain: customInitialState?.residentBrain || DEFAULT_RESIDENT_BRAIN
+  };
 
-  // Fiber-level concurrency decoupling: prevent heavy sub-module transitions from blocking main thread input
+  const [state, dispatch] = useReducer(orchestratorReducer, mergedInitial);
   const deferredActiveModule = useDeferredValue(state.activeModule);
+
+  // Continuously keep OrchestratorRuntime synchronized with active React Fiber state
+  useEffect(() => {
+    orchestratorRuntime.syncContext({
+      activeModule: state.activeModule,
+      activeAccountEmail: state.activeAccountEmail,
+      devMode: state.devMode,
+      agentInternetAllowed: state.agentInternetAllowed,
+      lamportClock: state.lamportClock,
+      model: state.residentBrain.model
+    });
+  }, [
+    state.activeModule,
+    state.activeAccountEmail,
+    state.devMode,
+    state.agentInternetAllowed,
+    state.lamportClock,
+    state.residentBrain.model
+  ]);
 
   const setActiveModule = useCallback((module: ModuleType) => {
     dispatch({ type: 'SET_MODULE', payload: module });
@@ -125,6 +174,15 @@ export function useOrchestrator(initialState: OrchestratorState = initialOrchest
     dispatch({ type: 'SET_UI_MUTATION', payload: mutation });
   }, []);
 
+  const coordinateSubsystem = useCallback(async (target: string, action: string, payload?: any) => {
+    dispatch({ type: 'INCREMENT_CLOCK' });
+    return await orchestratorRuntime.coordinate(target, action, payload, 'useOrchestrator');
+  }, []);
+
+  const getResidentState = useCallback((): ResidentBrainState => {
+    return orchestratorRuntime.getResidentState();
+  }, []);
+
   return {
     state,
     dispatch,
@@ -135,6 +193,8 @@ export function useOrchestrator(initialState: OrchestratorState = initialOrchest
     toggleInternet,
     setDevMode,
     switchAccountEmail,
-    setUiMutation
+    setUiMutation,
+    coordinateSubsystem,
+    getResidentState
   };
 }

@@ -59,7 +59,7 @@ export const ApiSecretsModule: React.FC = () => {
       } else {
         // Fallback default structure
         setKeysStatus([
-          { id: 'gemini', name: 'Google Gemini API', envVar: 'GEMINI_API_KEY', category: 'LLM & AI', status: 'INJECTED', maskedValue: 'AIzaSy...2_EFhw', proxyEndpoint: '/api/chat', description: 'Server-side proxy for Gemini 2.5 Flash, Flash-Lite, and Pro reasoning' },
+          { id: 'gemini', name: 'Google Gemini Permanent Developer API', envVar: 'GEMINI_API_KEY', category: 'LLM & AI', status: 'INJECTED', maskedValue: 'Permanent Env', proxyEndpoint: '/api/chat', description: 'Server-side proxy for Gemini 4 Hydrogen & Gemini 3 tiers (infinite no-limit use)' },
           { id: 'deepseek', name: 'DeepSeek API', envVar: 'DEEPSEEK_API_KEY', category: 'LLM & AI', status: 'FALLBACK_ACTIVE', proxyEndpoint: '/api/chat', description: 'Native DeepSeek R1 and V3 reasoning models' },
           { id: 'groq', name: 'Groq LPU Acceleration', envVar: 'GROQ_API_KEY', category: 'LLM & AI', status: 'FALLBACK_ACTIVE', proxyEndpoint: '/api/chat', description: 'Sub-second LPU inference for open weights' },
           { id: 'openrouter', name: 'OpenRouter MoE Matrix', envVar: 'OPENROUTER_API_KEY', category: 'LLM & AI', status: 'FALLBACK_ACTIVE', proxyEndpoint: '/api/chat', description: 'Universal MoE routing across all premier models' },
@@ -70,7 +70,7 @@ export const ApiSecretsModule: React.FC = () => {
       }
     } catch (_) {
       setKeysStatus([
-        { id: 'gemini', name: 'Google Gemini API', envVar: 'GEMINI_API_KEY', category: 'LLM & AI', status: 'INJECTED', maskedValue: 'AIzaSy...2_EFhw', proxyEndpoint: '/api/chat', description: 'Server-side proxy for Gemini 2.5 Flash and Flash-Lite' },
+        { id: 'gemini', name: 'Google Gemini Permanent Developer API', envVar: 'GEMINI_API_KEY', category: 'LLM & AI', status: 'INJECTED', maskedValue: 'Permanent Env', proxyEndpoint: '/api/chat', description: 'Server-side proxy for Gemini 4 Hydrogen & Gemini 3 tiers (infinite no-limit use)' },
         { id: 'firebase', name: 'Firebase Firestore & Auth', envVar: 'FIREBASE_API_KEY', category: 'Database & Storage', status: 'INJECTED', maskedValue: 'AIzaSy...2_EFhw', proxyEndpoint: '/api/health', description: 'Persistent cloud database & authentication' },
         { id: 'github', name: 'GitHub Integration Token', envVar: 'GITHUB_TOKEN', category: 'Cloud & Search', status: 'INJECTED', maskedValue: 'ghp_...a89', proxyEndpoint: '/api/github/status', description: 'Live repository telemetry & schema provenance' }
       ]);

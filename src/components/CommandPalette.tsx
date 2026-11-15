@@ -35,7 +35,8 @@ import {
   HardDrive,
   Network,
   Wrench,
-  Activity
+  Activity,
+  Phone
 } from 'lucide-react';
 import type { ModuleType, Artifact } from '../types';
 
@@ -107,6 +108,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       { id: 'github', title: 'GitHub Sovereign Ingestion', desc: 'Repositories status, endpoints latency monitor & commits', icon: FolderGit2, color: 'text-amber-400', badge: 'Active' },
       { id: 'osint', title: 'OSINT & Attack Surface Deck', desc: 'Passive external perimeter reconnaissance, DNS/mail defense, TLS SANs & RFC 9116 audit', icon: Search, color: 'text-cyan-400', badge: 'OWASP' },
       { id: 'burner-mail', title: 'Sovereign Burner Email Matrix', desc: 'Unlimited real disposable inboxes, instant OTP extraction, and automated link verification', icon: Mail, color: 'text-amber-400', badge: 'Burner' },
+      { id: 'infinite-sim', title: 'Infinite SIM & Burner Numbers', desc: 'Unlimited virtual eSIM profiles, Luhn ICCIDs, LPA QR provisioning & infinite burner phone numbers with SMS/OTP routing', icon: Phone, color: 'text-emerald-400', badge: 'Infinite SIM' },
       { id: 'projects', title: 'Unified Projects Orchestrator', desc: 'Consolidate and merge all 8 sovereign repositories under Joshua Hamilton with Immutable seals', icon: FolderGit2, color: 'text-amber-400', badge: '17.8k Commits' },
       { id: 'functions', title: 'Function Deck & Toolbelt', desc: '12+ instant browser utilities (Base64, JSON, Regex, Hash, Passwords, UUIDs)', icon: Zap, color: 'text-rose-400', badge: '12 Tools' },
       { id: 'drive', title: 'Google Drive Storage', desc: 'Browse, view, create, and manage files in Google Drive with OAuth 2.0', icon: HardDrive, color: 'text-amber-400', badge: 'Drive' },

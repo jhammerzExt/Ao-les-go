@@ -1,0 +1,87 @@
+{
+  "simProfiles": [
+    {
+      "id": "sim-1794734555535-01e449",
+      "label": "Primary Infinite eSIM (US)",
+      "countryCode": "US",
+      "carrierName": "Lyrailius Carrier US 5G",
+      "mcc": "310",
+      "mnc": "260",
+      "iccid": "8931310260514961351",
+      "imsi": "310260407276416",
+      "eid": "890490323108862362963599700483",
+      "smdpAddress": "smdp.us.lyrailius-carrier.net",
+      "matchingId": "LYRA-9859ABD247CA",
+      "activationCode": "LPA:1$smdp.us.lyrailius-carrier.net$LYRA-9859ABD247CA",
+      "apn": "lyrailius.5g.us",
+      "networkStandard": "5G NR SA / LTE-A Pro",
+      "kiFingerprint": "0x66C666093A07B9CD51816AB5",
+      "opcFingerprint": "0x2A59C227E49C0AB4020A4089",
+      "status": "ACTIVE",
+      "dataQuota": "UNLIMITED",
+      "createdAt": "2026-11-15T09:22:35.535Z"
+    }
+  ],
+  "burnerNumbers": [
+    {
+      "id": "num-1794734555536-a58466",
+      "simId": "sim-1794734555535-01e449",
+      "e164": "+14151733666",
+      "displayNumber": "+1 (415) 173-3666",
+      "countryCode": "US",
+      "countryName": "United States",
+      "dialCode": "+1",
+      "areaCode": "415",
+      "tag": "Verification",
+      "capabilities": [
+        "SMS",
+        "VOICE",
+        "OTP_PARSE",
+        "WEBHOOK"
+      ],
+      "status": "ONLINE",
+      "autoExtractOtp": true,
+      "messageCount": 3,
+      "createdAt": "2026-11-15T09:22:35.536Z",
+      "lastActivityAt": "2026-11-15T09:30:05.002Z"
+    },
+    {
+      "id": "num-1794734555536-1c1fe2",
+      "simId": "sim-1794734555535-01e449",
+      "e164": "+447700675133",
+      "displayNumber": "+44 7700 675 133",
+      "countryCode": "GB",
+      "countryName": "United Kingdom",
+      "dialCode": "+44",
+      "areaCode": "7700",
+      "tag": "Europe Relay",
+      "capabilities": [
+        "SMS",
+        "VOICE",
+        "OTP_PARSE",
+        "WEBHOOK"
+      ],
+      "status": "ONLINE",
+      "autoExtractOtp": true,
+      "messageCount": 0,
+      "createdAt": "2026-11-15T09:22:35.536Z"
+    }
+  ],
+  "smsMessages": [
+    {
+      "id": "sms-1794734555536",
+      "numberId": "num-1794734555536-a58466",
+      "e164": "+14151733666",
+      "direction": "INBOUND",
+      "from": "CarrierBridge",
+      "to": "+14151733666",
+      "body": "eSIM profile 961351 provisioned on Lyrailius Carrier US 5G. Your gateway activation code is 849201.",
+      "otpCode": "849201",
+      "extractedUrls": [],
+      "simIccid": "8931310260514961351",
+      "read": false,
+      "createdAt": "2026-11-15T09:22:35.536Z"
+    }
+  ],
+  "voiceCalls": []
+}

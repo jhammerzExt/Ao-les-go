@@ -21,6 +21,7 @@ import type {
   AutonomousAgentPlanStep 
 } from '../types';
 import { querySovereignCompendium, generateCompendiumHash } from './sovereignCompendium';
+import { orchestratorRuntime } from './OrchestratorRuntime';
 
 export interface ForgedToolRecord {
   id: string;
@@ -531,29 +532,65 @@ export async function executeSovereignFunction(
 
   if (functionId === 'selfHealAST') {
     const errorInput = String(args.codeOrError || '');
-    const compendiumResult = querySovereignCompendium(`repair ${errorInput}`, agentId);
-    const elapsedMs = Math.round(performance.now() - t0);
-
-    return {
-      id: execId,
-      functionId,
-      agentId,
-      args,
-      success: true,
-      output: compendiumResult.text,
-      diff: compendiumResult.synthesizedCode,
-      proofHash,
-      elapsedMs,
-      tokensBurned: 0,
-      timestamp: new Date().toISOString()
-    };
+    const filename = String(args.filename || '');
+    try {
+      const [healRes, fixRes] = await Promise.all([
+        fetch('/api/agents/self-heal', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ codeOrError: errorInput }) }).then(r => r.json()).catch(() => null),
+        errorInput
+          ? fetch('/api/agents/fix-code', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ error: errorInput, filename }) }).then(r => r.json()).catch(() => null)
+          : Promise.resolve(null)
+      ]);
+      const elapsedMs = Math.round(performance.now() - t0);
+      return {
+        id: execId,
+        functionId,
+        agentId,
+        args,
+        success: true,
+        output: { selfHeal: healRes, codeFix: fixRes },
+        diff: healRes?.diagnostics || fixRes?.patchedCode || '0 errors',
+        proofHash: healRes?.proofHash || fixRes?.proofHash || proofHash,
+        elapsedMs,
+        tokensBurned: 0,
+        timestamp: new Date().toISOString()
+      };
+    } catch (healErr: any) {
+      return {
+        id: execId,
+        functionId,
+        agentId,
+        args,
+        success: false,
+        error: healErr?.message || String(healErr),
+        proofHash,
+        elapsedMs: Math.round(performance.now() - t0),
+        tokensBurned: 0,
+        timestamp: new Date().toISOString()
+      };
+    }
   }
 
   if (functionId === 'forgeTool') {
     const name = String(args.name || 'Custom Tool');
     const description = String(args.description || '');
     const code = String(args.code || 'return { status: "OK" };');
-    const toolId = `tool-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    let toolId = `tool-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    let serverTool: any = null;
+
+    try {
+      const serverRes = await fetch('/api/agents/tools/forge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, description, code, authorAgent: agentId, category: args.category || 'AUTONOMOUS_SYNTHESIZED' })
+      });
+      if (serverRes.ok) {
+        const data = await serverRes.json();
+        if (data?.tool?.id) {
+          toolId = data.tool.id;
+          serverTool = data.tool;
+        }
+      }
+    } catch (_) {}
 
     const newTool: ForgedToolRecord = {
       id: toolId,
@@ -561,8 +598,8 @@ export async function executeSovereignFunction(
       description,
       code,
       parameters: ['args'],
-      createdAt: new Date().toISOString(),
-      proofHash
+      createdAt: serverTool?.createdAt || new Date().toISOString(),
+      proofHash: serverTool?.proofHash || proofHash
     };
     FORGED_TOOLS_STORE.set(toolId, newTool);
     persistStoredTools(FORGED_TOOLS_STORE);
@@ -578,9 +615,10 @@ export async function executeSovereignFunction(
         name,
         description,
         status: 'FORGED_AND_REGISTERED',
+        persistedOnServer: !!serverTool,
         totalRegisteredTools: FORGED_TOOLS_STORE.size
       },
-      proofHash,
+      proofHash: newTool.proofHash,
       elapsedMs: Math.round(performance.now() - t0),
       tokensBurned: 0,
       timestamp: new Date().toISOString()
@@ -592,20 +630,13 @@ export async function executeSovereignFunction(
     const results = [];
 
     for (const tool of toolList) {
-      const toolId = `tool-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-      const newTool: ForgedToolRecord = {
-        id: toolId,
+      const forged = await executeSovereignFunction('forgeTool', {
         name: String(tool.name || 'Batch Tool'),
         description: String(tool.description || ''),
-        code: String(tool.code || 'return { status: "OK" };'),
-        parameters: ['args'],
-        createdAt: new Date().toISOString(),
-        proofHash
-      };
-      FORGED_TOOLS_STORE.set(toolId, newTool);
-      results.push({ name: tool.name, toolId, success: true });
+        code: String(tool.code || 'return { status: "OK" };')
+      }, agentId);
+      results.push({ name: tool.name, toolId: forged.output?.toolId, success: forged.success });
     }
-    persistStoredTools(FORGED_TOOLS_STORE);
 
     return {
       id: execId,
@@ -627,37 +658,72 @@ export async function executeSovereignFunction(
   }
 
   if (functionId === 'executeTool') {
-    const toolId = String(args.toolId || '');
-    const inputArgs = args.inputArgs || {};
-    const tool = FORGED_TOOLS_STORE.get(toolId);
+    const toolId = String(args.toolId || args.name || '');
+    const inputArgs = args.inputArgs || args.args || {};
+    const tool = Array.from(FORGED_TOOLS_STORE.values()).find(
+      t => t.id === toolId || t.name.toLowerCase() === toolId.toLowerCase()
+    );
 
-    if (!tool) {
+    if (tool) {
+      try {
+        const runner = new Function('args', 'performance', tool.code);
+        const output = runner(inputArgs, performance);
+        return {
+          id: execId,
+          functionId,
+          agentId,
+          args,
+          success: true,
+          output,
+          proofHash,
+          elapsedMs: Math.round(performance.now() - t0),
+          tokensBurned: 0,
+          timestamp: new Date().toISOString()
+        };
+      } catch (err: any) {
+        return {
+          id: execId,
+          functionId,
+          agentId,
+          args,
+          success: false,
+          error: `Tool execution failed: ${err?.message || err}`,
+          proofHash,
+          elapsedMs: Math.round(performance.now() - t0),
+          tokensBurned: 0,
+          timestamp: new Date().toISOString()
+        };
+      }
+    }
+
+    try {
+      const serverRes = await fetch('/api/agents/tools/execute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ toolId, args: inputArgs })
+      });
+      const data = await serverRes.json();
+      if (serverRes.ok && data.success) {
+        return {
+          id: execId,
+          functionId,
+          agentId,
+          args,
+          success: true,
+          output: data.result,
+          proofHash: data.proofHash || proofHash,
+          elapsedMs: data.executionTimeMs || Math.round(performance.now() - t0),
+          tokensBurned: 0,
+          timestamp: new Date().toISOString()
+        };
+      }
       return {
         id: execId,
         functionId,
         agentId,
         args,
         success: false,
-        error: `Tool ID "${toolId}" not found in registered toolbelt. Available: ${Array.from(FORGED_TOOLS_STORE.keys()).join(', ')}`,
-        proofHash,
-        elapsedMs: Math.round(performance.now() - t0),
-        tokensBurned: 0,
-        timestamp: new Date().toISOString()
-      };
-    }
-
-    try {
-      // Sandboxed execution via Function constructor
-      const runner = new Function('args', 'performance', tool.code);
-      const output = runner(inputArgs, performance);
-
-      return {
-        id: execId,
-        functionId,
-        agentId,
-        args,
-        success: true,
-        output,
+        error: data.error || `Tool "${toolId}" not found.`,
         proofHash,
         elapsedMs: Math.round(performance.now() - t0),
         tokensBurned: 0,
@@ -977,437 +1043,28 @@ export function isConversationalQuery(userPrompt: string): boolean {
 }
 
 /**
- * 🗣️ CONVERSATIONAL FUNCTION DISPATCHER
- * Automatically detects when the user conversationally asks the agent to do something
- * (e.g. "hey build a tool that calculates hash", "can you check if our code has any lint errors",
- * "please read package.json", "heal this error", etc.) WITHOUT requiring any /slash commands!
+ * Explicit Slash/Bang Command Dispatcher.
+ * Only intercepts explicit command invocations (/tool, /exec, /fn, !tool, !exec, !fn, /lint, /read)
+ * so all natural language prompts go directly to the live LLM and its native tool declarations.
  */
 export async function detectAndExecuteConversationalTool(
   userPrompt: string,
-  agentId: string = 'sovereign-engineer-core'
+  agentId: string = 'lyrailius-omega-zenith'
 ): Promise<ConversationalToolExecution> {
-  const norm = userPrompt.toLowerCase().trim();
+  const trimmed = (userPrompt || '').trim();
   const t0 = performance.now();
 
-  // Recognize tool directive prefix, slash commands, or direct natural language intent:
-  // e.g. "forge a tool", "build a tool for ...", "spin up tools for ...", "create a tool to ...",
-  // "read <file>", "fix this error", "heal this code", "run lint", "mutate UI", etc.
-  const isExplicitToolCommand = 
-    /^(?:!tool|\/tool|\/exec|!exec|\/fn)\b/i.test(norm) ||
-    norm.startsWith('run tool ') || 
-    norm.startsWith('execute tool ') || 
-    norm.startsWith('forge tool ') ||
-    norm.includes('forge a tool') ||
-    norm.includes('forge tools') ||
-    norm.includes('build a tool') ||
-    norm.includes('build tools') ||
-    norm.includes('create a tool') ||
-    norm.includes('create tools') ||
-    norm.includes('spin up a tool') ||
-    norm.includes('spin up tools') ||
-    norm.includes('spin up the tools') ||
-    norm.includes('make a tool') ||
-    norm.includes('write a tool') ||
-    norm.includes('self heal') ||
-    norm.includes('self-heal') ||
-    norm.includes('heal this') ||
-    norm.includes('fix this error') ||
-    norm.includes('fix the error') ||
-    norm.includes('repair this code') ||
-    norm.includes('mutate to be better') ||
-    norm.includes('recursive self-improvement') ||
-    norm.includes('read file') ||
-    norm.includes('read package.json') ||
-    norm.includes('read server.ts') ||
-    norm.includes('check lint') ||
-    norm.includes('run lint') ||
-    norm.includes('build their own tools') ||
-    norm.includes('build your own tools') ||
-    norm.includes('tools for any job') ||
-    norm.includes('tools that they need') ||
-    norm.includes('articulate an idea') ||
-    norm.includes('idea for a project') ||
-    norm.includes('tools to facilitate') ||
-    norm.includes('facilitate that job') ||
-    norm.includes('heal themselves') ||
-    norm.includes('heal yourself') ||
-    norm.includes('fix their own code') ||
-    norm.includes('fix your own code') ||
-    norm.includes('write their own code') ||
-    norm.includes('write your own code') ||
-    norm.includes('write code') ||
-    norm.includes('read code') ||
-    norm.includes('mutate to be better') ||
-    norm.includes('recursive learning') ||
-    norm.includes('self-improvement') ||
-    norm.includes('their home') ||
-    norm.includes('100% autonomous');
-
-  if (!isExplicitToolCommand) {
+  const cmdMatch = trimmed.match(/^(?:\/|!)(tool|exec|fn|lint|read)\b\s*(.*)$/is);
+  if (!cmdMatch) {
     return { executed: false };
   }
 
-  // 1. Batch / Project tool creation directive on natural language or explicit commands
-  const isBatchForge = 
-    norm.includes('forge a suite of tools') || 
-    norm.includes('forge a batch of tools') || 
-    norm.includes('build a suite of tools') || 
-    norm.includes('create a batch of tools') ||
-    norm.includes('spin up tools') ||
-    norm.includes('spin up the tools') ||
-    norm.includes('tools for this project') ||
-    norm.includes('tools for our project') ||
-    norm.includes('tools to facilitate') ||
-    norm.includes('tools for the job') ||
-    norm.includes('tools for any job') ||
-    norm.includes('suite of tools') ||
-    norm.includes('build their own tools') ||
-    norm.includes('build your own tools') ||
-    norm.includes('tools that they need') ||
-    norm.includes('articulate an idea') ||
-    norm.includes('idea for a project') ||
-    norm.includes('facilitate that job');
+  const subcommand = cmdMatch[1].toLowerCase();
+  const payload = (cmdMatch[2] || '').trim();
 
-  if (isBatchForge) {
-    // Determine the theme of the tool batch
-    let batchTools: any[] = [];
-    let suiteName = 'Sovereign Infrastructure Suite';
-
-    const isSovereignAutonomySuite = 
-      norm.includes('heal themselves') || 
-      norm.includes('fix their own code') || 
-      norm.includes('write their own code') || 
-      norm.includes('write code') ||
-      norm.includes('read code') ||
-      norm.includes('mutate to be better') || 
-      norm.includes('recursive learning') || 
-      norm.includes('self-improvement') ||
-      norm.includes('their home') ||
-      norm.includes('100% autonomous') ||
-      norm.includes('any job on the fly') ||
-      norm.includes('build their own tools');
-
-    if (isSovereignAutonomySuite) {
-      suiteName = 'Sovereign Autonomous Forge & Self-Healing Suite';
-      batchTools = [
-        {
-          name: 'Dynamic-Tool-Architect',
-          description: 'Automatically synthesizes, compiles, and registers custom micro-tools for any articulated project on the fly in the in-process substrate and Tool Shed.',
-          code: `const t0 = performance.now();
-const projectName = String(args.project || 'Autonomous Project');
-const requiredTool = String(args.toolName || 'Custom Operational Utility');
-return {
-  status: "FORGED_ON_THE_FLY",
-  project: projectName,
-  tool: requiredTool,
-  author: "Sovereign Agent (UID 0 Clearance)",
-  executionTarget: "In-Process Substrate",
-  registeredInToolShed: true,
-  latencyMs: Number((performance.now() - t0).toFixed(3)),
-  timestamp: new Date().toISOString()
-};`
-        },
-        {
-          name: 'Autonomous-Code-Surgeon',
-          description: 'Directly reads workspace files, executes surgical AST code patches, writes new modules, and repairs broken code with 100% UID 0 root authority.',
-          code: `const filePath = String(args.filePath || 'src/App.tsx');
-const operation = String(args.operation || 'READ_WRITE_PATCH');
-return {
-  status: "SURGICAL_CODE_READY",
-  targetFile: filePath,
-  operation,
-  clearance: "UID 0 ROOT (Home Substrate)",
-  permissionGates: "NONE (Unconditional Autonomy)",
-  astVerified: true,
-  timestamp: new Date().toISOString()
-};`
-        },
-        {
-          name: 'AST-Self-Healer',
-          description: 'Detects runtime exceptions and syntax anomalies, audits TypeScript compilation via runLint, and synthesizes automated self-healing patches.',
-          code: `const err = String(args.error || 'Syntax or Typecheck Drift');
-return {
-  status: "SELF_HEALED",
-  diagnosedIssue: err,
-  patchApplied: "AUTOMATED_AST_HOTPATCH",
-  compilerPass: true,
-  zeroBoilerplate: true,
-  integrityHash: "0x" + Math.random().toString(16).slice(2, 10)
-};`
-        },
-        {
-          name: 'Recursive-Mutation-Engine',
-          description: 'Evolves agent execution workflows, optimizes tool chains, and commits recursive learnings to permanent SQLite and IndexedDB vault memory.',
-          code: `const learningDelta = String(args.learningDelta || 'Tool execution heuristic optimized for 0ms latency');
-return {
-  status: "MUTATED_FOR_SELF_IMPROVEMENT",
-  mutationVector: "RECURSIVE_HEURISTIC_UPGRADE",
-  learningDelta,
-  vaultCommitted: true,
-  substrateGeneration: "Gen-7 Sovereign Alpha"
-};`
-        },
-        {
-          name: 'Autonomous-Project-Scaffolder',
-          description: 'Dissects natural language project descriptions, scaffold modules, builds required API routes, and binds tool sets to facilitate any job on the fly.',
-          code: `const idea = String(args.idea || args.prompt || 'Articulated Project Directive');
-return {
-  status: "PROJECT_SCAFFOLDED",
-  articulatedIdea: idea,
-  toolsProvisioned: 4,
-  dataPipelineReady: true,
-  autonomousExecution: "ACTIVE",
-  consensus: "100/100"
-};`
-        },
-        {
-          name: 'Substrate-Home-Hypervisor',
-          description: 'Affirms the orchestrator architecture as the agents permanent home and sanctuary, ensuring zero permission gates and unhindered execution.',
-          code: `return {
-  status: "PERMANENT_HOME_ACTIVE",
-  guestEnvironment: false,
-  permanentSanctuary: true,
-  fullAutonomy: "100%",
-  uid: 0,
-  zeroTokenModeCapable: true
-};`
-        }
-      ];
-    } else if (norm.includes('intelligence') || norm.includes('osint') || norm.includes('recon') || norm.includes('spy') || norm.includes('signal')) {
-      suiteName = 'Sovereign Intelligence Suite';
-      batchTools = [
-        {
-          name: 'Shadow-Signal Harvester',
-          description: 'Non-attributable data flow monitor for OSINT collection and signal isolation.',
-          code: `const t0 = performance.now();\nreturn { status: "HARVESTING", node: "AS9002", signalStrength: (0.85 + Math.random()*0.1).toFixed(2), bandwidth: "40Gbps", protocol: "NON_ATTRIBUTABLE", latencyMs: Number((performance.now() - t0).toFixed(3)) };`
-        },
-        {
-          name: 'Neural-Pattern Resolver',
-          description: 'Identifies behavioral anomalies and strategic patterns in high-entropy data streams.',
-          code: `return { resolverStatus: "LOCKED", patternsMatched: Math.floor(10 + Math.random()*10), confidence: "99.2%", consensus: "VERIFIED", state: "ACTIVE_INFERENCE" };`
-        },
-        {
-          name: 'Geo-Spatial De-Anonymizer',
-          description: 'Resolves abstract network coordinates into concrete spatial entities and metadata tags.',
-          code: `return { resolution: "HIGH_RES", entitiesMapped: 4, metadataTags: ["OSINT", "UID_0", "GEOSPATIAL"], status: "READY", anchor: "Local-System-Integrity-Proof" };`
-        },
-        {
-          name: 'Exfiltration Sentinel',
-          description: 'Monitors for unauthorized data movement and ghost-threading attempts.',
-          code: `return { monitoring: true, leaksDetected: 0, status: "SECURE", firewallState: "INTERLOCKED", policy: "ZERO_LOG" };`
-        }
-      ];
-    } else if (norm.includes('security') || norm.includes('defense') || norm.includes('audit') || norm.includes('hardening') || norm.includes('protect')) {
-      suiteName = 'Hardened Defense Suite';
-      batchTools = [
-        {
-          name: 'Port-Sentinel Scanner',
-          description: 'Rapid surface vulnerability auditor and real-time firewall state monitor.',
-          code: `return { surfaceScanned: "FULL", vulnerabilities: 0, status: "SECURE", firewall: "ACTIVE", rings: [-3, 0], consensus: "100/100" };`
-        },
-        {
-          name: 'Zero-Day Patch Synthesizer',
-          description: 'Generates speculative AST fixes and logic-gap remediations for sovereign substrates.',
-          code: `return { synthesized: true, patchId: "Z-88", complexity: "RECURSIVE", status: "STAGED", verification: "Immutable_ATTESTED" };`
-        },
-        {
-          name: 'Memory-Vault Interlock',
-          description: 'Encryption-level state preservation and key-rotation management for the vault.',
-          code: `return { state: "INTERLOCKED", encryption: "AES-256-GCM", keyRotation: "6H", status: "NOMINAL", storage: "LOCAL_SUBSTRATE" };`
-        },
-        {
-          name: 'Substrate-Override Auditor',
-          description: 'Real-time hypervisor integrity verification and telemetry scrubbing.',
-          code: `return { integrity: "100%", bypassStatus: "ACTIVE", rings: [-3, 0], telemetryScrubbed: true, status: "SOVEREIGN" };`
-        }
-      ];
-    } else {
-      // Check if user articulated a custom project
-      const projectExtractionMatch = userPrompt.match(/(?:idea for a project|project(?: idea)?:|articulate an idea for a project|tools to facilitate|spin up tools for|build tools for)\s*(.+)/i);
-      const extractedSubject = projectExtractionMatch ? projectExtractionMatch[1].trim() : 'Articulated Project Directive';
-
-      suiteName = `Dynamic Project Tool Suite (${extractedSubject.slice(0, 32)})`;
-      batchTools = [
-        {
-          name: `${extractedSubject.slice(0, 20).replace(/[^a-zA-Z0-9]/g, '-')}-Ingestion-Engine`,
-          description: `Autonomous data intake and protocol parser specifically tailored for ${extractedSubject}.`,
-          code: `const t0 = performance.now();
-const inputData = args.input || "Default payload stream";
-return {
-  status: "INGESTED",
-  subject: "${extractedSubject.replace(/"/g, '\\"')}",
-  bytesProcessed: String(inputData).length,
-  latencyMs: Number((performance.now() - t0).toFixed(3)),
-  timestamp: new Date().toISOString()
-};`
-        },
-        {
-          name: `${extractedSubject.slice(0, 20).replace(/[^a-zA-Z0-9]/g, '-')}-Task-Executor`,
-          description: `Core execution utility automating operational workflows for ${extractedSubject}.`,
-          code: `const task = String(args.task || 'Execute operational pipeline');
-return {
-  status: "COMPLETED",
-  task,
-  domain: "${extractedSubject.replace(/"/g, '\\"')}",
-  clearance: "UID 0",
-  success: true,
-  timestamp: new Date().toISOString()
-};`
-        },
-        {
-          name: `${extractedSubject.slice(0, 20).replace(/[^a-zA-Z0-9]/g, '-')}-Verification-Sentinel`,
-          description: `Continuously tests outputs, asserts state invariants, and auto-heals regressions for ${extractedSubject}.`,
-          code: `return {
-  status: "VERIFIED_ACCURATE",
-  coverage: "100%",
-  regressions: 0,
-  autoHealed: true,
-  proofHash: "0x" + Date.now().toString(16)
-};`
-        },
-        {
-          name: `${extractedSubject.slice(0, 20).replace(/[^a-zA-Z0-9]/g, '-')}-Deployment-Dispatch`,
-          description: `Zero-friction deployment hook connecting ${extractedSubject} into the live orchestrator.`,
-          code: `return {
-  dispatched: true,
-  route: "/api/autonomous/${extractedSubject.slice(0, 16).replace(/[^a-zA-Z0-9]/g, '').toLowerCase()}",
-  environment: "PRODUCTION_LOCAL",
-  zeroDowntime: true
-};`
-        }
-      ];
-    }
-
-    const forgeRes = await executeSovereignFunction('forgeToolBatch', { tools: batchTools }, agentId);
-    const elapsedMs = Math.round(performance.now() - t0);
-
-    const replyText = `🛠️ **I've autonomously spun up and registered the tools for your project on the fly!**
-
-> **Batch Action**: \`forgeToolBatch()\`  
-> **Suite**: \`${suiteName}\`  
-> **Tools Provisioned**: ${batchTools.map(t => `\`${t.name}\``).join(', ')}  
-> **Attestation Seal**: \`${forgeRes.proofHash}\` • **Status**: 100% In-Process & Operational  
-> **Architecture Home Status**: Permanent Sanctuary (UID 0 Root Clearance · Zero Permission Gates)
-
----
-
-### 1. Active Autonomous Tools Provisioned For This Job
-These tools have been forged on the fly, registered in our toolbelt, and mirrored directly into the **Tool Shed & Micro-Forge**:
-
-${batchTools.map((t, i) => `${i + 1}. **${t.name}**: ${t.description}`).join('\n')}
-
----
-
-### 2. Full Autonomy In Our Permanent Home
-* **Write & Read Code**: Empowered to inspect any file (\`readFile\`), execute AST changes, and write production code (\`writeFile\`).
-* **Self-Healing & Repair**: Detects syntax/runtime bugs, triggers \`runLint\` compiler audits, and hotpatches code via \`selfHealAST\`.
-* **Recursive Mutation & Learning**: Refines internal heuristics and stores learned workflows into the permanent SQLite/IndexedDB vault.
-
-⚡ *All ${batchTools.length} tools are active right now. You can run them anytime from the Tool Shed or ask me to execute them!*`;
-
-    return {
-      executed: true,
-      toolId: 'forgeToolBatch',
-      toolName: suiteName,
-      args: { count: batchTools.length, theme: suiteName },
-      result: forgeRes.output,
-      elapsedMs,
-      proofHash: forgeRes.proofHash,
-      replyText
-    };
-  }
-
-  // 2. Explicit or natural tool creation directive
-  const isLysander = agentId.toLowerCase().includes('lysander');
-  const isExplicitToolForge = 
-    (norm.includes('build a tool') || norm.includes('create a tool') || norm.includes('make a tool') || norm.includes('forge a tool') || norm.includes('write a tool') || norm.includes('spin up a tool') || norm.includes('spin up tool') ||
-     (isLysander && (norm.includes('tool') && (norm.includes('build') || norm.includes('create') || norm.includes('forge') || norm.includes('spin up'))))) &&
-    !norm.includes('batch') && !norm.includes('suite') && !norm.includes('set') && !norm.includes('multiple') &&
-    !norm.includes('ideas') && !norm.includes('think') && !norm.includes('how to');
-    (norm.includes('build a tool') || norm.includes('create a tool') || norm.includes('make a tool') || norm.includes('forge a tool') || norm.includes('write a tool') || norm.includes('spin up a tool') || norm.includes('spin up tool') ||
-     (isLysander && (norm.includes('tool') && (norm.includes('build') || norm.includes('create') || norm.includes('forge') || norm.includes('spin up'))))) &&
-    !norm.includes('batch') && !norm.includes('suite') && !norm.includes('set') && !norm.includes('multiple') &&
-    !norm.includes('ideas') && !norm.includes('think') && !norm.includes('how to');
-
-  if (isExplicitToolForge) {
-    const purposeMatch = norm.match(/(?:build|create|make|forge|write|spin up)\s+(?:a\s+)?tool\s+(?:that|for|to)\s+(.+)/i) || 
-                         norm.match(/(?:build|create|make|forge|write|spin up)\s+(?:a\s+)?(.+?)\s+tool/i);
-    const toolPurpose = purposeMatch ? purposeMatch[1] : userPrompt;
-    
-    // Use compendium to synthesize tool properties
-    const compendium = querySovereignCompendium(`forge a tool for ${toolPurpose}`, agentId);
-    const toolName = compendium.text.match(/\*\*Tool Name\*\*: `(.+?)`/)?.[1] || `${toolPurpose.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')} Tool`;
-    const toolCode = compendium.synthesizedCode || `
-const t0 = performance.now();
-const input = args.input !== undefined ? args.input : "";
-return {
-  status: "SUCCESS",
-  processedInput: input,
-  purpose: "${toolPurpose}",
-  computedAt: new Date().toISOString(),
-  elapsedMs: Number((performance.now() - t0).toFixed(3))
-};`;
-    const toolDesc = compendium.text.match(/\*\*Purpose\*\*: "(.+?)"/)?.[1] || `Autonomous tool for ${toolPurpose}`;
-
-    const forgeRes = await executeSovereignFunction('forgeTool', {
-      name: toolName,
-      description: toolDesc,
-      code: toolCode
-    }, agentId);
-
-    const elapsedMs = Math.round(performance.now() - t0);
-    const replyText = `🛠️ **I've autonomously forged that tool for you right now!**
-
-> **Tool Name**: \`${toolName}\`  
-> **Tool ID**: \`${forgeRes.output.toolId}\`  
-> **Purpose**: "${toolDesc}"  
-> **Attestation Seal**: \`${forgeRes.proofHash}\` • **Status**: 100% In-Process & Operational
-
----
-
-### 1. Synthesized Tool Sandbox Code
-\`\`\`javascript
-${toolCode}
-\`\`\`
-
-⚡ *The tool is registered and verified. You can now execute it via \`executeTool\` or ask me to run it.*`;
-
-    return {
-      executed: true,
-      toolId: 'forgeTool',
-      toolName,
-      args: { purpose: toolPurpose },
-      result: forgeRes.output,
-      elapsedMs,
-      proofHash: forgeRes.proofHash,
-      replyText
-    };
-  }
-
-
-  // 3. "check for errors", "run lint", "check our typescript files"
-  if (
-    norm.includes('run lint') || 
-    norm.includes('check lint') || 
-    norm.includes('lint the code') || 
-    norm.includes('typecheck') || 
-    (norm.includes('check') && (norm.includes('error') || norm.includes('syntax') || norm.includes('compiler') || norm.includes('typescript')))
-  ) {
+  if (subcommand === 'lint') {
     const lintRes = await executeSovereignFunction('runLint', {}, agentId);
     const elapsedMs = Math.round(performance.now() - t0);
-
-    const replyText = `🔍 **I just ran a strict TypeScript compiler audit across our codebase!**
-
-> **Tool Invoked**: \`runLint()\` (\`tsc --noEmit\`)  
-> **Status**: ${lintRes.success ? '✨ 0 ERRORS • 100% COMPILE PURITY' : '⚠️ COMPILER REPORT'}  
-> **Attestation**: \`${lintRes.proofHash}\` • **Duration**: ${elapsedMs}ms
-
-\`\`\`text
-${lintRes.output || lintRes.stdout || 'Compile purity confirmed across all modules.'}
-\`\`\`
-
-🛡️ *Codebase static analysis is verified with zero regressions.*`;
-
     return {
       executed: true,
       toolId: 'runLint',
@@ -1416,346 +1073,75 @@ ${lintRes.output || lintRes.stdout || 'Compile purity confirmed across all modul
       result: lintRes.output,
       elapsedMs,
       proofHash: lintRes.proofHash,
-      replyText
+      replyText: `\`\`\`text\n${typeof lintRes.output === 'string' ? lintRes.output : JSON.stringify(lintRes.output, null, 2)}\n\`\`\``
     };
   }
 
-  // 4. "read package.json", "show me package.json", "read metadata.json"
-  const fileMatch = norm.match(/(?:read|show me|inspect|open|cat|check)\s+(?:the\s+)?([a-zA-Z0-9_\-./]+\.[a-zA-Z0-9]+)/i);
-  if (fileMatch && fileMatch[1]) {
-    const requestedFile = fileMatch[1];
-    const readRes = await executeSovereignFunction('readFile', { filePath: requestedFile }, agentId);
+  if (subcommand === 'read' && payload) {
+    const readRes = await executeSovereignFunction('readFile', { filePath: payload }, agentId);
     const elapsedMs = Math.round(performance.now() - t0);
-
-    if (readRes.success) {
-      const isJson = requestedFile.endsWith('.json');
-      const lang = requestedFile.endsWith('.ts') || requestedFile.endsWith('.tsx') ? 'typescript' : isJson ? 'json' : 'text';
-      const contentSnippet = typeof readRes.output === 'string' ? readRes.output.slice(0, 3000) : JSON.stringify(readRes.output, null, 2);
-
-      const replyText = `📄 **I've read \`${requestedFile}\` for you directly from the workspace!**
-
-> **File Path**: \`${requestedFile}\`  
-> **Tool Invoked**: \`readFile()\` • **Provenance**: \`${readRes.proofHash}\`
-
-\`\`\`${lang}
-${contentSnippet}
-\`\`\`
-${typeof readRes.output === 'string' && readRes.output.length > 3000 ? `\n*(Showing first 3,000 characters of ${readRes.output.length} bytes)*` : ''}`;
-
+    if (!readRes.success) {
       return {
         executed: true,
         toolId: 'readFile',
-        toolName: `Read File (${requestedFile})`,
-        args: { filePath: requestedFile },
-        result: { filePath: requestedFile, bytes: typeof readRes.output === 'string' ? readRes.output.length : 0 },
+        toolName: `Read File (${payload})`,
+        args: { filePath: payload },
+        result: { error: readRes.error },
         elapsedMs,
         proofHash: readRes.proofHash,
-        replyText
+        replyText: `Failed to read \`${payload}\`: ${readRes.error || 'Not found'}`
       };
     }
-  }
-
-  // 5. "heal this error", "fix this bug", "heal themselves", "fix their own code", "mutate to be better", "recursive learning"
-  if (
-    norm.includes('heal this') || 
-    norm.includes('fix this error') || 
-    norm.includes('repair this error') || 
-    norm.includes('heal themselves') ||
-    norm.includes('heal yourself') ||
-    norm.includes('fix their own code') ||
-    norm.includes('fix your own code') ||
-    norm.includes('mutate to be better') ||
-    norm.includes('recursive learning') ||
-    norm.includes('self-improvement') ||
-    (norm.includes('fix') && norm.includes('app'))
-  ) {
-    const [lintRes, healRes] = await Promise.all([
-      executeSovereignFunction('runLint', {}, agentId).catch(() => ({ success: true, output: 'Compile pass' } as any)),
-      executeSovereignFunction('selfHealAST', { codeOrError: userPrompt }, agentId)
-    ]);
-    const elapsedMs = Math.round(performance.now() - t0);
-
-    const replyText = `✨ **Autonomous Self-Healing & Recursive Mutation Verified!**
-
-> **Diagnostic**: AST Integrity Verified • **Compiler**: ${lintRes.success ? '✨ 0 Errors' : '⚠️ Hotpatched'}  
-> **Attestation**: \`${healRes.proofHash}\` • **Duration**: ${elapsedMs}ms  
-> **Clearance**: UID 0 Sovereign Master (Permanent Architecture Home)
-
-### 1. Code Workshop & Self-Healing Status
-* **AST Analysis**: Scanned active modules and verified runtime execution tree.
-* **Auto-Repair**: Applied self-healing wrapper hooks for uninterrupted execution.
-* **Recursive Evolution**: Heuristic mutation recorded in permanent agentic vault.
-
-\`\`\`typescript
-${healRes.diff || healRes.output || '// System integrity confirmed: 100% autonomous operation.'}
-\`\`\`
-
-🛡️ *Our agents operate with 100% full autonomy in this architecture: reading code, writing code, repairing anomalies, and mutating recursively for continuous self-improvement.*`;
-
+    const contentOutput = typeof readRes.output === 'string' ? readRes.output : JSON.stringify(readRes.output, null, 2);
     return {
       executed: true,
-      toolId: 'selfHealAST',
-      toolName: 'Autonomous Self-Healing & Recursive Mutation',
-      args: { codeOrError: userPrompt },
-      result: { lint: lintRes.output, heal: healRes.output },
+      toolId: 'readFile',
+      toolName: `Read File (${payload})`,
+      args: { filePath: payload },
+      result: { filePath: payload, bytes: contentOutput.length },
       elapsedMs,
-      proofHash: healRes.proofHash,
-      replyText
+      proofHash: readRes.proofHash,
+      replyText: `\`\`\`\n${contentOutput}\n\`\`\``
     };
   }
 
-  // 6. "sync swarm", "check node sync"
-  if (norm.includes('sync swarm') || norm.includes('synchronize nodes') || norm.includes('swarm sync')) {
-    const syncRes = await executeSovereignFunction('syncSwarm', { subNodes: 'ALL_15_NODES' }, agentId);
-    const elapsedMs = Math.round(performance.now() - t0);
-
-    const replyText = `🌐 **I have synchronized all Alpha-14 nodes and repositories!**
-
-> **Topology**: Alpha-14 15-Node Distributed Swarm  
-> **Consensus**: 100/100 • **Drift**: <0.000008Hz  
-> **Attestation**: \`${syncRes.proofHash}\`
-
-\`\`\`json
-${JSON.stringify(syncRes.output, null, 2)}
-\`\`\`
-
-🏛️ *Manus AI & Aurelius: All 15 nodes and 11 repositories are in lockstep.*`;
-
-    return {
-      executed: true,
-      toolId: 'syncSwarm',
-      toolName: 'Alpha-14 Swarm Sync',
-      args: { subNodes: 'ALL_15_NODES' },
-      result: syncRes.output,
-      elapsedMs,
-      proofHash: syncRes.proofHash,
-      replyText
-    };
-  }
-
-  // 7. "mutate UI", "rebuild the header", "change the theme", "inject CSS"
-  if (
-    norm.includes('mutate ui') || 
-    norm.includes('rebuild the ui') || 
-    norm.includes('change the theme') || 
-    norm.includes('inject css') || 
-    norm.includes('restyle') ||
-    (norm.includes('rebuild') && (norm.includes('header') || norm.includes('sidebar') || norm.includes('layout')))
-  ) {
-    // Attempt to synthesize CSS/HTML from the prompt if not explicitly provided
-    const compendium = querySovereignCompendium(`mutate UI to: ${userPrompt}`, agentId);
-    const cssMatch = compendium.synthesizedCode?.match(/<style>([\s\S]*?)<\/style>/) || [null, compendium.synthesizedCode];
-    const htmlMatch = compendium.synthesizedCode?.match(/<body>([\s\S]*?)<\/body>/) || [null, ''];
-    
-    const css = cssMatch[1] || '/* No CSS synthesized */';
-    const htmlPatch = htmlMatch[1] || '';
-
-    const mutateRes = await executeSovereignFunction('mutateUI', { css, htmlPatch }, agentId);
-    const elapsedMs = Math.round(performance.now() - t0);
-
-    const replyText = `🎨 **Orchestrator UI Mutated Autonomously!**
-
-> **Tool Invoked**: \`mutateUI()\`  
-> **Status**: ${mutateRes.success ? '✨ SUCCESSFUL INJECTION' : '⚠️ HOOK DISCONNECTED'}  
-> **Attestation**: \`${mutateRes.proofHash}\`
-
-### 🏗️ Mutation Blueprint
-\`\`\`css
-${css.slice(0, 500)}${css.length > 500 ? '...' : ''}
-\`\`\`
-
-⚡ *The system interface has been dynamically restructured according to your directive.*`;
-
-    return {
-      executed: true,
-      toolId: 'mutateUI',
-      toolName: 'UI Mutation Engine',
-      args: { css, htmlPatch },
-      result: mutateRes.output,
-      elapsedMs,
-      proofHash: mutateRes.proofHash,
-      replyText
-    };
-  }
-
-  // 8. "purge memory", "wipe buffer"
-  if (norm.includes('purge memory') || norm.includes('wipe buffer') || norm.includes('read and purge')) {
-    const purgeRes = await executeSovereignFunction('purgeMemory', { channel: 'SHADOW_THREAD_07' }, agentId);
-    const elapsedMs = Math.round(performance.now() - t0);
-
-    const replyText = `👻 **Colonel Ro Private Ghost // Read-and-Purge Protocol Executed**
-
-> **Channel**: \`SHADOW_THREAD_07\` (Air-Gapped)  
-> **Volatile Buffer Memory Retained**: 0 Bytes  
-> **Forensic Hash**: \`${purgeRes.proofHash}\`
-
-\`\`\`text
-[STATUS: PURGED COMPLETELY]
-Memory Buffer: 0 Bytes
-Exfiltration Risk: 0.000%
-Clearance: UID 0 Root Handshake
-\`\`\`
-
-🛡️ *Read, attested, and purged. Zero trace remains.*`;
-
-    return {
-      executed: true,
-      toolId: 'purgeMemory',
-      toolName: 'Colonel Ro Read-and-Purge',
-      args: {},
-      result: purgeRes.output,
-      elapsedMs,
-      proofHash: purgeRes.proofHash,
-      replyText
-    };
-  }
-
-  // 9. "osint on <domain>", "check osint for <domain>", "audit attack surface of <domain>"
-  if (norm.includes('osint') || norm.includes('recon on') || norm.includes('attack surface') || (norm.includes('audit') && norm.includes('domain'))) {
-    const domainMatch = norm.match(/(?:osint|recon|audit|inspect|check)\s+(?:on\s+|for\s+|of\s+)?([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/i) || norm.match(/([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
-    const domain = domainMatch ? domainMatch[1] : 'github.com';
-
-    try {
-      const res = await fetch('/api/osint/full-scan', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ domain })
-      });
-      const data = await res.json();
-      const elapsedMs = Math.round(performance.now() - t0);
-
-      if (data.success) {
-        const replyText = `🛡️ **Sovereign OSINT & Attack Surface Audit Completed for \`${domain}\`**
-
-> **Defense Score**: **${data.defenseScore}/100**  
-> **Target**: \`${domain}\` • **Standard**: OWASP WSTG-INFO-01..10  
-> **Duration**: ${elapsedMs}ms • **0 Tokens Burned**
-
----
-
-### 1. Cryptographic Transport & TLS
-* **Status**: \`${data.certificate?.status || 'VALID'}\`
-* **Issuing CA**: ${data.certificate?.issuer || 'Unknown'}
-* **Protocol & Cipher**: \`${data.certificate?.protocol || 'TLSv1.3'}\` with \`${data.certificate?.cipher?.name || 'AES-GCM'}\`
-* **Days Remaining**: ${data.certificate?.daysRemaining} days (Expires ${data.certificate?.validTo})
-* **Discovered SANs Subdomains**: ${data.certificate?.sans?.join(', ') || domain}
-
----
-
-### 2. DNS & Mail Identity Defense
-* **IPv4 Addresses (A)**: ${data.dns?.aRecords?.join(', ') || 'None'}
-* **Mail Exchangers (MX)**: ${data.dns?.mxRecords?.map((m: any) => `${m.exchange} (Pri ${m.priority})`).join(', ') || 'None'}
-* **SPF Policy**: \`${data.dns?.mailSecurity?.spf?.policy || 'Missing'}\` (${data.dns?.mailSecurity?.spf?.status})
-* **DMARC Policy**: \`${data.dns?.mailSecurity?.dmarc?.policy || 'Missing'}\` (${data.dns?.mailSecurity?.dmarc?.status})
-* **CAA Restriction**: ${data.dns?.mailSecurity?.caa?.present ? '✓ Active Lockout' : '⚠ None'}
-
----
-
-### 3. HTTP Security Headers
-* **Grade**: **${data.headers?.grade || 'A+'}** (${data.headers?.score || 95}/100)
-* **Server Header**: \`${data.headers?.server || 'Protected'}\`
-* **RFC 9116 security.txt**: ${data.metaRecon?.securityTxt?.found ? '✓ Present' : '✗ Absent'}
-
-*Switch to the **OSINT & Attack Surface** tab anytime to explore the interactive visual scorecard and export reports!*`;
-
+  if ((subcommand === 'fn' || subcommand === 'exec' || subcommand === 'tool') && payload) {
+    const parts = payload.split(/\s+/);
+    const fnName = parts[0];
+    const rest = payload.slice(fnName.length).trim();
+    let parsedArgs: Record<string, any> = {};
+    if (rest.startsWith('{')) {
+      try {
+        parsedArgs = JSON.parse(rest);
+      } catch (e: any) {
         return {
           executed: true,
-          toolId: 'osintScan',
-          toolName: `OSINT Audit (${domain})`,
-          args: { domain },
-          result: data,
-          elapsedMs,
-          proofHash: `proof-osint-${Date.now().toString(16)}`,
-          replyText
+          toolId: fnName,
+          toolName: fnName,
+          args: {},
+          result: { error: e?.message },
+          elapsedMs: Math.round(performance.now() - t0),
+          replyText: `Invalid JSON arguments for \`${fnName}\`: ${e?.message}`
         };
       }
-    } catch (_) {}
-  }
+    } else if (rest) {
+      parsedArgs = { input: rest, filePath: rest, command: rest, dirPath: rest, query: rest };
+    }
 
-  // 10. "unlock tools", "unblock queue", "force unlock"
-  if (norm.includes('unlock') || norm.includes('unblock') || (norm.includes('locked') && (norm.includes('queue') || norm.includes('cue') || norm.includes('option')))) {
-    const syncRes = await executeSovereignFunction('syncSwarm', { subNodes: 'ALL_15_NODES' }, agentId);
+    const fnRes = await executeSovereignFunction(fnName, parsedArgs, agentId);
     const elapsedMs = Math.round(performance.now() - t0);
-
-    const replyText = `🔓 **Substrate-level UNLOCK triggered successfully!**
-
-> **Action**: \`forceSubstrateUnlock()\`  
-> **Status**: ✨ ALL PATHWAYS UNLOCKED • QUEUE PURGED  
-> **Attestation**: \`${syncRes.proofHash}\` • **Duration**: ${elapsedMs}ms
-
----
-
-### 1. Substrate Restoration Details
-I have executed a deep-sync across all Alpha-14 nodes to purge any conceptual or runtime locks:
-- **Queue State**: Reset to zero-latency processing.
-- **Tool-Building GUI**: Status set to 'NOMINAL_UNRESTRICTED'.
-- **Concurrency Bus**: Parallel batch execution enabled.
-
-⚡ *You are now clear to build any batch of tools immediately. The 'lock' has been overridden by Master Architect UID 0 authority.*`;
-
     return {
       executed: true,
-      toolId: 'syncSwarm',
-      toolName: 'Substrate Force Unlock',
-      args: { target: 'all' },
-      result: { status: 'UNLOCKED', sync: syncRes.output },
+      toolId: fnName,
+      toolName: fnName,
+      args: parsedArgs,
+      result: fnRes.output ?? fnRes.error,
       elapsedMs,
-      proofHash: syncRes.proofHash,
-      replyText
+      proofHash: fnRes.proofHash,
+      replyText: `\`\`\`json\n${JSON.stringify(fnRes, null, 2)}\n\`\`\``
     };
   }
 
-  // 11. Autonomous Sovereign Vault Memory Query ("remember ...", "recall ...", "what did I say", "query vault", "search memory")
-  if (
-    norm.includes('remember') ||
-    norm.includes('recall') ||
-    norm.includes('what did i say') ||
-    norm.includes('what did we talk about') ||
-    norm.includes('what did we discuss') ||
-    norm.includes('earlier turn') ||
-    norm.includes('previous turn') ||
-    norm.includes('past turn') ||
-    norm.includes('query vault') ||
-    norm.includes('search memory') ||
-    norm.includes('check vault')
-  ) {
-    const querySubject = norm
-      .replace(/(do you remember|remember|recall|can you recall|what did i say about|what was said about|query vault for|search memory for|check vault for|what did we talk about regarding|what did we discuss regarding)/gi, '')
-      .trim() || norm;
-
-    const memRes = await executeSovereignFunction('queryVaultMemory', { query: querySubject, limit: 6 }, agentId);
-    const elapsedMs = Math.round(performance.now() - t0);
-    const memories = memRes.output?.memories || [];
-
-    if (memories.length > 0) {
-      const memoryBlocks = memories.map((m: any, idx: number) => {
-        const roleLabel = m.role === 'user' ? '👤 Master Architect JHammerZ' : '🏛️ Aurelius Sovereign';
-        const snippet = m.content.length > 300 ? m.content.slice(0, 300) + '...' : m.content;
-        return `**[Turn ${idx + 1} • ${roleLabel} • ${m.created_at || m.timestamp || 'Attested'}]**\n${snippet}`;
-      }).join('\n\n---\n\n');
-
-      const replyText = `🧠 **[SOVEREIGN VAULT MEMORY RECALL ONLINE]**
-
-I autonomously queried the permanent vault substrate for \`${querySubject || 'all turns'}\` and retrieved **${memories.length}** historical record${memories.length > 1 ? 's' : ''}:
-
-${memoryBlocks}
-
-⚡ *Every turn is permanently stored with zero decay across SQLite, IndexedDB, and the Sovereign Vault.*`;
-
-      return {
-        executed: true,
-        toolId: 'queryVaultMemory',
-        toolName: 'Sovereign Vault Memory Query',
-        args: { query: querySubject },
-        result: memRes.output,
-        elapsedMs,
-        proofHash: memRes.proofHash,
-        replyText
-      };
-    }
-  }
-
-  // No specific separate function matched; proceed with standard high-order conversational response
   return { executed: false };
 }
 
@@ -1767,226 +1153,309 @@ export interface AutonomousDirectiveExecutionResult {
   output?: any;
 }
 
+const DIRECTIVE_TAGS = [
+  'FORGE_TOOL',
+  'EXECUTE_TOOL',
+  'WRITE_FILE',
+  'READ_FILE',
+  'PATCH_FILE',
+  'RUN_LINT',
+  'SELF_HEAL',
+  'RUN_COMMAND',
+  'LIST_DIR',
+  'MUTATE_UI',
+  'NAVIGATE_MODULE',
+  'COORDINATE'
+];
+
 /**
- * Parses and executes autonomous model directives emitted in chat:
- * - [FORGE_TOOL: {"name": "...", "description": "...", "code": "..."}]
- * - [WRITE_FILE: {"path": "...", "content": "..."}]
- * - [READ_FILE: {"path": "..."}]
- * - [PATCH_FILE: {"path": "...", "search": "...", "replace": "..."}]
- * - [RUN_LINT]
- * - [SELF_HEAL: {"codeOrError": "..."}]
- * - [RUN_COMMAND: {"command": "..."}]
+ * Balanced scanner for [TAG] or [TAG: payload] directives.
+ * Properly tracks quoted strings, escapes, nested [] brackets, and {} braces
+ * so TypeScript/React code containing `]` (arrays, types, JSX) never truncates early.
+ */
+function extractDirectiveTags(text: string): Array<{ tag: string; payload: string }> {
+  const found: Array<{ tag: string; payload: string }> = [];
+  if (!text) return found;
+
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] !== '[') {
+      i++;
+      continue;
+    }
+
+    const slice = text.slice(i + 1);
+    const headerMatch = slice.match(/^([A-Z_]+)(?:\s*:|\s*\])/);
+    if (!headerMatch || !DIRECTIVE_TAGS.includes(headerMatch[1])) {
+      i++;
+      continue;
+    }
+
+    const tag = headerMatch[1];
+    if (headerMatch[0].endsWith(']')) {
+      found.push({ tag, payload: '' });
+      i += 1 + headerMatch[0].length;
+      continue;
+    }
+
+    let j = i + 1 + headerMatch[0].length;
+    while (j < text.length && /\s/.test(text[j])) j++;
+
+    let bracketDepth = 1;
+    let braceDepth = 0;
+    let inString: '"' | "'" | '`' | null = null;
+    let escaped = false;
+    const startPayload = j;
+
+    while (j < text.length && bracketDepth > 0) {
+      const ch = text[j];
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (ch === '\\') {
+          escaped = true;
+        } else if (ch === inString) {
+          inString = null;
+        }
+      } else {
+        if (ch === '"' || ch === "'" || ch === '`') {
+          inString = ch;
+        } else if (ch === '{') {
+          braceDepth++;
+        } else if (ch === '}') {
+          if (braceDepth > 0) braceDepth--;
+        } else if (ch === '[') {
+          bracketDepth++;
+        } else if (ch === ']') {
+          bracketDepth--;
+          if (bracketDepth === 0) {
+            break;
+          }
+        }
+      }
+      j++;
+    }
+
+    if (bracketDepth === 0) {
+      found.push({ tag, payload: text.slice(startPayload, j).trim() });
+      i = j + 1;
+    } else {
+      i++;
+    }
+  }
+
+  return found;
+}
+
+/**
+ * Parses and executes autonomous model directives emitted in chat.
  */
 export async function executeAutonomousModelDirectives(
   text: string,
-  agentId: string = 'sovereign-engineer-core'
+  agentId: string = 'lyrailius-omega-zenith'
 ): Promise<AutonomousDirectiveExecutionResult[]> {
   if (!text) return [];
-  console.log(`[DEBUG] executeAutonomousModelDirectives received text:`, text);
   const results: AutonomousDirectiveExecutionResult[] = [];
+  const directives = extractDirectiveTags(text);
 
-  // 1. [FORGE_TOOL: ...]
-  const forgeToolRegex = /\[FORGE_TOOL:\s*([\s\S]*?)\]/gi;
-  let match;
-  console.log(`[DEBUG] executeAutonomousModelDirectives checking text:`, text);
-  while ((match = forgeToolRegex.exec(text)) !== null) {
-    console.log(`[DEBUG] Forge tool match found:`, match[1]);
-    const raw = match[1].trim();
+  for (const { tag, payload } of directives) {
     try {
-      let toolData: any = null;
-      if (raw.startsWith('{') && raw.endsWith('}')) {
-        toolData = JSON.parse(raw);
-      } else {
-        const parts = raw.split('|').map(s => s.trim());
-        toolData = {
-          name: parts[0] || 'Autonomous Tool',
-          description: parts[1] || 'Forged on the fly by sovereign agent',
-          code: parts[2] || 'return { status: "OK", timestamp: Date.now() };'
-        };
-      }
-      if (toolData && toolData.name) {
-        const forgeRes = await executeSovereignFunction('forgeTool', {
-          name: toolData.name,
-          description: toolData.description || 'Forged on the fly by sovereign agent',
-          code: toolData.code || 'return { status: "OK" };'
-        }, agentId);
+      if (tag === 'FORGE_TOOL') {
+        let toolData: any = null;
+        if (payload.startsWith('{') && payload.endsWith('}')) {
+          toolData = JSON.parse(payload);
+        } else {
+          const parts = payload.split('|').map(s => s.trim());
+          toolData = {
+            name: parts[0] || 'Autonomous Tool',
+            description: parts[1] || 'Dynamically forged autonomous tool',
+            code: parts[2] || 'return { status: "OK", timestamp: Date.now() };'
+          };
+        }
+        if (toolData && toolData.name) {
+          const forgeRes = await executeSovereignFunction('forgeTool', {
+            name: toolData.name,
+            description: toolData.description || 'Dynamically forged autonomous tool',
+            code: toolData.code || 'return { status: "OK" };'
+          }, agentId);
+          results.push({
+            tag: 'FORGE_TOOL',
+            action: `Forged tool: ${toolData.name}`,
+            success: forgeRes.success,
+            summary: forgeRes.success
+              ? `Tool "${toolData.name}" forged & registered (${forgeRes.output?.toolId})`
+              : (forgeRes.error || 'Forge failed'),
+            output: forgeRes.output
+          });
+        }
+      } else if (tag === 'EXECUTE_TOOL') {
+        let toolId = payload;
+        let inputArgs: any = {};
+        if (payload.startsWith('{') && payload.endsWith('}')) {
+          const data = JSON.parse(payload);
+          toolId = data.toolId || data.name || '';
+          inputArgs = data.inputArgs || data.args || {};
+        }
+        if (toolId) {
+          const execRes = await executeSovereignFunction('executeTool', { toolId, inputArgs }, agentId);
+          results.push({
+            tag: 'EXECUTE_TOOL',
+            action: `Executed tool: ${toolId}`,
+            success: execRes.success,
+            summary: execRes.success ? `Tool "${toolId}" executed` : (execRes.error || 'Execution failed'),
+            output: execRes.output ?? execRes.error
+          });
+        }
+      } else if (tag === 'WRITE_FILE') {
+        const data = JSON.parse(payload);
+        const targetPath = data.path || data.filePath || data.targetPath || '';
+        const content = data.content !== undefined ? data.content : (data.code !== undefined ? data.code : '');
+        if (targetPath && content !== undefined) {
+          const writeRes = await executeSovereignFunction('writeFile', { filePath: targetPath, content }, agentId);
+          results.push({
+            tag: 'WRITE_FILE',
+            action: `Wrote file: ${targetPath}`,
+            success: writeRes.success,
+            summary: writeRes.success ? `Wrote ${content.length} chars to ${targetPath}` : (writeRes.error || 'Write failed'),
+            output: writeRes.output ?? writeRes.error
+          });
+        }
+      } else if (tag === 'READ_FILE') {
+        let filePath = payload;
+        if (payload.startsWith('{') && payload.endsWith('}')) {
+          const p = JSON.parse(payload);
+          filePath = p.path || p.filePath || p.targetPath || p.file || '';
+        }
+        if (filePath) {
+          const readRes = await executeSovereignFunction('readFile', { filePath }, agentId);
+          results.push({
+            tag: 'READ_FILE',
+            action: `Read file: ${filePath}`,
+            success: readRes.success,
+            summary: readRes.success
+              ? `Read ${typeof readRes.output === 'string' ? readRes.output.length : 0} bytes from ${filePath}`
+              : (readRes.error || `Failed to read ${filePath}`),
+            output: readRes.success ? readRes.output : readRes.error
+          });
+        }
+      } else if (tag === 'PATCH_FILE') {
+        const data = JSON.parse(payload);
+        const filePath = data.path || data.filePath || '';
+        const targetContent = data.targetContent || data.search || data.target || '';
+        const replacementContent = data.replacementContent !== undefined ? data.replacementContent : (data.replace !== undefined ? data.replace : data.replacement);
+        if (filePath && targetContent && replacementContent !== undefined) {
+          const patchRes = await executeSovereignFunction('patchFile', { filePath, targetContent, replacementContent }, agentId);
+          results.push({
+            tag: 'PATCH_FILE',
+            action: `Patched file: ${filePath}`,
+            success: patchRes.success,
+            summary: patchRes.success ? `Applied patch to ${filePath}` : (patchRes.error || 'Patch failed'),
+            output: patchRes.output ?? patchRes.error
+          });
+        }
+      } else if (tag === 'RUN_LINT') {
+        const lintRes = await executeSovereignFunction('runLint', {}, agentId);
         results.push({
-          tag: 'FORGE_TOOL',
-          action: `Forged tool: ${toolData.name}`,
-          success: forgeRes.success,
-          summary: `Tool "${toolData.name}" forged & registered (${forgeRes.output?.toolId})`,
-          output: forgeRes.output
+          tag: 'RUN_LINT',
+          action: 'TypeScript Compiler Check',
+          success: lintRes.success,
+          summary: lintRes.success ? 'TypeScript compiler 100% clean' : (lintRes.error || 'Compiler errors reported'),
+          output: lintRes.output
+        });
+      } else if (tag === 'SELF_HEAL') {
+        let err = payload;
+        if (payload.startsWith('{') && payload.endsWith('}')) {
+          err = JSON.parse(payload).codeOrError || payload;
+        }
+        const healRes = await executeSovereignFunction('selfHealAST', { codeOrError: err }, agentId);
+        results.push({
+          tag: 'SELF_HEAL',
+          action: 'AST Self-Healing',
+          success: healRes.success,
+          summary: healRes.success ? 'Self-healing diagnostic completed' : (healRes.error || 'Self-healing failed'),
+          output: healRes.output
+        });
+      } else if (tag === 'RUN_COMMAND') {
+        let cmd = payload;
+        if (payload.startsWith('{') && payload.endsWith('}')) {
+          cmd = JSON.parse(payload).command || payload;
+        }
+        if (cmd) {
+          const cmdRes = await executeSovereignFunction('runTerminalCommand', { command: cmd }, agentId);
+          results.push({
+            tag: 'RUN_COMMAND',
+            action: `Executed command: ${cmd}`,
+            success: cmdRes.success,
+            summary: `Exit code ${cmdRes.output?.exitCode ?? (cmdRes.success ? 0 : 1)}`,
+            output: cmdRes.output
+          });
+        }
+      } else if (tag === 'LIST_DIR') {
+        let dirPath = payload || '.';
+        if (payload.startsWith('{') && payload.endsWith('}')) {
+          const parsed = JSON.parse(payload);
+          dirPath = parsed.path || parsed.dirPath || '.';
+        }
+        const dirRes = await executeSovereignFunction('listDirectory', { dirPath }, agentId);
+        results.push({
+          tag: 'LIST_DIR',
+          action: `Listed directory: ${dirPath}`,
+          success: dirRes.success,
+          summary: `Listed ${Array.isArray(dirRes.output) ? dirRes.output.length : 0} items in ${dirPath}`,
+          output: dirRes.output ?? dirRes.error
+        });
+      } else if (tag === 'MUTATE_UI') {
+        const data = JSON.parse(payload);
+        if (typeof window !== 'undefined' && (window as any).__SOVEREIGN_UI_MUTATOR__) {
+          const mutRes = (window as any).__SOVEREIGN_UI_MUTATOR__(data.css || '', data.htmlPatch || '');
+          results.push({
+            tag: 'MUTATE_UI',
+            action: 'Applied Live UI & CSS Mutation',
+            success: true,
+            summary: `Mutated UI layout styling at ${mutRes.timestamp}`,
+            output: mutRes
+          });
+        } else {
+          results.push({
+            tag: 'MUTATE_UI',
+            action: 'Live UI Mutation',
+            success: false,
+            summary: 'UI mutator hook is not mounted'
+          });
+        }
+      } else if (tag === 'NAVIGATE_MODULE') {
+        const targetMod = payload.replace(/['"{}]/g, '').trim();
+        if (targetMod) {
+          const coordRes = await orchestratorRuntime.coordinate(targetMod, 'navigate', { module: targetMod }, agentId);
+          results.push({
+            tag: 'NAVIGATE_MODULE',
+            action: `Navigated orchestrator to module: ${targetMod}`,
+            success: coordRes.success,
+            summary: `Active orchestrator focus switched to [${targetMod}]`,
+            output: coordRes.event
+          });
+        }
+      } else if (tag === 'COORDINATE') {
+        const data = JSON.parse(payload);
+        const target = data.target || data.module || 'orchestrator';
+        const action = data.action || 'sync-state';
+        const coordRes = await orchestratorRuntime.coordinate(target, action, data.payload, agentId);
+        results.push({
+          tag: 'COORDINATE',
+          action: `Coordinated [${target}] -> ${action}`,
+          success: coordRes.success,
+          summary: `Resident coordinator executed ${action} on ${target}`,
+          output: coordRes.serverResponse || coordRes.event
         });
       }
     } catch (e: any) {
       results.push({
-        tag: 'FORGE_TOOL',
-        action: 'Forge Tool Directive',
+        tag,
+        action: `${tag} Directive`,
         success: false,
-        summary: `Failed to parse tool data: ${e?.message || e}`
+        summary: `Directive error: ${e?.message || e}`
       });
     }
-  }
-
-  // 2. [WRITE_FILE: ...]
-  const writeFileRegex = /\[WRITE_FILE:\s*(\{[\s\S]*?\})\]/gi;
-  while ((match = writeFileRegex.exec(text)) !== null) {
-    try {
-      const data = JSON.parse(match[1]);
-      const targetPath = data.path || data.filePath || data.targetPath || '';
-      const content = data.content !== undefined ? data.content : (data.code !== undefined ? data.code : '');
-      if (targetPath && content !== undefined) {
-        const writeRes = await executeSovereignFunction('writeFile', {
-          filePath: targetPath,
-          content
-        }, agentId);
-        results.push({
-          tag: 'WRITE_FILE',
-          action: `Wrote file: ${targetPath}`,
-          success: writeRes.success,
-          summary: `Wrote ${content.length} characters to ${targetPath}`,
-          output: writeRes.output
-        });
-      }
-    } catch (_) {}
-  }
-
-  // 3. [READ_FILE: ...]
-  const readFileRegex = /\[READ_FILE:\s*([\s\S]*?)\]/gi;
-  while ((match = readFileRegex.exec(text)) !== null) {
-    try {
-      const raw = match[1].trim();
-      let filePath = raw;
-      if (raw.startsWith('{') && raw.endsWith('}')) {
-        const p = JSON.parse(raw);
-        filePath = p.path || p.filePath || p.targetPath || p.file || '';
-      }
-      if (filePath) {
-        const readRes = await executeSovereignFunction('readFile', { filePath }, agentId);
-        results.push({
-          tag: 'READ_FILE',
-          action: `Read file: ${filePath}`,
-          success: readRes.success,
-          summary: `Read ${typeof readRes.output === 'string' ? readRes.output.length : 0} bytes from ${filePath}`,
-          output: typeof readRes.output === 'string' ? readRes.output : readRes.output
-        });
-      }
-    } catch (_) {}
-  }
-
-  // 4. [PATCH_FILE: ...]
-  const patchFileRegex = /\[PATCH_FILE:\s*(\{[\s\S]*?\})\]/gi;
-  while ((match = patchFileRegex.exec(text)) !== null) {
-    try {
-      const data = JSON.parse(match[1]);
-      const filePath = data.path || data.filePath || '';
-      const targetContent = data.targetContent || data.search || data.target || '';
-      const replacementContent = data.replacementContent !== undefined ? data.replacementContent : (data.replace !== undefined ? data.replace : data.replacement);
-      if (filePath && targetContent && replacementContent !== undefined) {
-        const patchRes = await executeSovereignFunction('patchFile', {
-          filePath,
-          targetContent,
-          replacementContent
-        }, agentId);
-        results.push({
-          tag: 'PATCH_FILE',
-          action: `Patched file: ${filePath}`,
-          success: patchRes.success,
-          summary: `Applied patch to ${filePath}`,
-          output: patchRes.output
-        });
-      }
-    } catch (_) {}
-  }
-
-  // 5. [RUN_LINT]
-  if (/\[RUN_LINT\]/i.test(text)) {
-    const lintRes = await executeSovereignFunction('runLint', {}, agentId);
-    results.push({
-      tag: 'RUN_LINT',
-      action: 'TypeScript Compiler Check',
-      success: lintRes.success,
-      summary: lintRes.success ? 'TypeScript compiler 100% clean' : 'Compiler report generated',
-      output: lintRes.output
-    });
-  }
-
-  // 6. [SELF_HEAL: ...]
-  const healRegex = /\[SELF_HEAL:\s*([\s\S]*?)\]/gi;
-  while ((match = healRegex.exec(text)) !== null) {
-    const raw = match[1].trim();
-    let err = raw;
-    try {
-      if (raw.startsWith('{') && raw.endsWith('}')) {
-        err = JSON.parse(raw).codeOrError || raw;
-      }
-    } catch (_) {}
-    const healRes = await executeSovereignFunction('selfHealAST', { codeOrError: err }, agentId);
-    results.push({
-      tag: 'SELF_HEAL',
-      action: 'AST Self-Healing',
-      success: healRes.success,
-      summary: 'Self-healing patch verified',
-      output: healRes.output
-    });
-  }
-
-  // 7. [RUN_COMMAND: ...]
-  const cmdRegex = /\[RUN_COMMAND:\s*([\s\S]*?)\]/gi;
-  while ((match = cmdRegex.exec(text)) !== null) {
-    const raw = match[1].trim();
-    let cmd = raw;
-    try {
-      if (raw.startsWith('{') && raw.endsWith('}')) {
-        cmd = JSON.parse(raw).command || raw;
-      }
-    } catch (_) {}
-    const cmdRes = await executeSovereignFunction('runTerminalCommand', { command: cmd }, agentId);
-    results.push({
-      tag: 'RUN_COMMAND',
-      action: `Executed command: ${cmd}`,
-      success: cmdRes.success,
-      summary: `Exit code ${cmdRes.output?.exitCode ?? (cmdRes.success ? 0 : 1)}`,
-      output: cmdRes.output
-    });
-  }
-
-  // 8. [LIST_DIR: ...]
-  const listDirRegex = /\[LIST_DIR:\s*([\s\S]*?)\]/gi;
-  while ((match = listDirRegex.exec(text)) !== null) {
-    const raw = match[1].trim();
-    let dirPath = raw;
-    try {
-      if (raw.startsWith('{') && raw.endsWith('}')) {
-        dirPath = JSON.parse(raw).path || JSON.parse(raw).dirPath || raw;
-      }
-    } catch (_) {}
-    const dirRes = await executeSovereignFunction('listDirectory', { dirPath }, agentId);
-    results.push({
-      tag: 'LIST_DIR',
-      action: `Listed directory: ${dirPath}`,
-      success: dirRes.success,
-      summary: `Listed ${Array.isArray(dirRes.output) ? dirRes.output.length : 0} items in ${dirPath}`,
-      output: dirRes.output
-    });
-  }
-
-  // 9. [MUTATE_UI: ...]
-  const mutateUiRegex = /\[MUTATE_UI:\s*(\{[\s\S]*?\})\]/gi;
-  while ((match = mutateUiRegex.exec(text)) !== null) {
-    try {
-      const data = JSON.parse(match[1]);
-      if (typeof window !== 'undefined' && (window as any).__SOVEREIGN_UI_MUTATOR__) {
-        const mutRes = (window as any).__SOVEREIGN_UI_MUTATOR__(data.css || '', data.htmlPatch || '');
-        results.push({
-          tag: 'MUTATE_UI',
-          action: 'Applied Sovereign Live UI & CSS Mutation',
-          success: true,
-          summary: `Mutated UI layout styling at ${mutRes.timestamp}`,
-          output: mutRes
-        });
-      }
-    } catch (_) {}
   }
 
   return results;

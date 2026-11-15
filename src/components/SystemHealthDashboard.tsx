@@ -361,6 +361,7 @@ export const SystemHealthDashboard: React.FC<SystemHealthDashboardProps> = ({
     { id: 'scratchpad', name: 'Scratchpad', tag: 'Memory' },
     { id: 'osint', name: 'OSINT Footprint', tag: 'Intel' },
     { id: 'burner-mail', name: 'Burner Mail', tag: 'Relay' },
+    { id: 'infinite-sim', name: 'Infinite-SIM & Burners', tag: 'Telecom' },
     { id: 'presets', name: 'Prompt Presets', tag: 'Directives' },
     { id: 'swarm-test', name: 'Swarm Diagnostic', tag: 'Testing' },
     { id: 'github', name: 'GitHub Matrix', tag: 'Sync' }
@@ -811,10 +812,10 @@ export const SystemHealthDashboard: React.FC<SystemHealthDashboardProps> = ({
                 <div>
                   <div className="font-bold text-cyan-300 flex items-center gap-1.5">
                     <Compass className="w-4 h-4 text-cyan-400" />
-                    <span>UNRESTRICTED AI NAVIGATION BUS</span>
+                    <span>LYRAILIUS OMEGA · RESIDENT COORDINATOR BUS</span>
                   </div>
                   <div className="text-[10px] text-zinc-400 mt-0.5">
-                    Every path, module, and device capability unlocked for any AI agent on the system.
+                    Model: <span className="text-emerald-300 font-semibold">gemini-4-hydrogen</span> · Token Limiters: <span className="text-emerald-300 font-semibold">REMOVED</span> · All 29 modules unlocked.
                   </div>
                 </div>
                 <button

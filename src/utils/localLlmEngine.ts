@@ -842,8 +842,7 @@ class LocalLlmManager {
       const reply = await this.engine.chat.completions.create({
         messages,
         stream: !!onToken,
-        temperature: 0.7,
-        max_tokens: 32768
+        temperature: 0.7
       });
 
       if (onToken && reply && typeof reply[Symbol.asyncIterator] === 'function') {
@@ -916,8 +915,7 @@ class LocalLlmManager {
         }
       ],
       stream: !!onToken,
-      temperature: 0.7,
-      max_tokens: 32768
+      temperature: 0.7
     };
 
     const response = await fetch(targetUrl, {

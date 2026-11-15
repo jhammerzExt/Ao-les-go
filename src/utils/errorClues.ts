@@ -3,10 +3,10 @@
  * ==============================================================================
  * CLUES FOR SUBSEQUENT AGENTS & MAINTAINERS:
  * 
- * 1. Infinite Context Window:
- *    - Cloud model calls in `server.ts` use `maxOutputTokens: 65536`.
- *    - Local WebLLM and Llama server endpoints in `src/utils/localLlmEngine.ts` use `max_tokens: 32768`.
- *    - If truncation occurs, check API response payload or client chunk timeout guards.
+ * 1. Unbounded Context & Zero Token Limiters:
+ *    - Artificial `maxOutputTokens`, `max_tokens`, and history-slice truncations have been removed
+ *      across `server.ts` and `src/utils/localLlmEngine.ts`.
+ *    - Gemini 4 Hydrogen operates as Permanent Resident Brain & Orchestrator Coordinator (`src/hooks/useOrchestrator.ts` & `src/utils/OrchestratorRuntime.ts`).
  * 
  * 2. UID 0 Root Authority:
  *    - All agent instructions and chat dispatchers inject `[ACTIVE PERMIT 0: UID 0 ROOT ARCHITECT CLEARANCE ACTIVE]` 
@@ -14,7 +14,7 @@
  * 
  * 3. Autonomous Tool Execution & Host Interceptor:
  *    - Embedded tags like `[READ_FILE]`, `[WRITE_FILE]`, `[PATCH_FILE]`, `[LIST_DIR]`, `[RUN_COMMAND]`, 
- *      and `[FORGE_TOOL]` are parsed and executed by `executeAutonomousModelDirectives` in `src/utils/functionEngine.ts`.
+ *      `[NAVIGATE_MODULE]`, `[COORDINATE]`, and `[FORGE_TOOL]` are parsed and executed by `executeAutonomousModelDirectives` in `src/utils/functionEngine.ts`.
  *    - Results are fed back into chat conversation flow and Audit Ledger.
  * 
  * 4. Burner Mail Multi-Provider Fallback:
@@ -24,7 +24,9 @@
  */
 
 export const SUBSTRATE_ERROR_CLUES_MANIFEST = {
-  version: '7.0.0-UNLOCKED',
+  version: '7.1.0-RESIDENT-UNBOUNDED',
   maintainer: 'Master Architect JHammerZ (UID 0)',
-  status: 'NOMINAL_INFINITE_CONTEXT'
+  residentBrain: 'gemini-4-hydrogen',
+  tokenLimiters: 'REMOVED',
+  status: 'NOMINAL_UNBOUNDED_CONTEXT'
 };

@@ -17,6 +17,7 @@ export type ModuleType =
   | 'github'
   | 'osint'
   | 'burner-mail'
+  | 'infinite-sim'
   | 'projects'
   | 'presets'
   | 'audit'
@@ -383,5 +384,96 @@ export interface AutonomyDiagnostic {
   proofHash: string;
 }
 
+export interface InfiniteSimProfile {
+  id: string;
+  label: string;
+  countryCode: string;
+  carrierName: string;
+  mcc: string;
+  mnc: string;
+  iccid: string;
+  imsi: string;
+  eid: string;
+  smdpAddress: string;
+  matchingId: string;
+  activationCode: string;
+  apn: string;
+  networkStandard: string;
+  kiFingerprint: string;
+  opcFingerprint: string;
+  status: 'ACTIVE' | 'STANDBY' | 'ROTATING';
+  dataQuota: 'UNLIMITED';
+  provider?: 'local-matrix' | 'twilio' | 'telnyx' | 'termux-hardware';
+  providerSid?: string;
+  assignedNumbersCount?: number;
+  createdAt: string;
+  rotatedAt?: string;
+}
 
+export interface BurnerPhoneNumber {
+  id: string;
+  simId: string;
+  e164: string;
+  displayNumber: string;
+  countryCode: string;
+  countryName: string;
+  dialCode: string;
+  areaCode: string;
+  tag: string;
+  capabilities: string[];
+  status: 'ONLINE' | 'PAUSED' | 'BURNED';
+  provider?: 'local-matrix' | 'twilio' | 'telnyx' | 'termux-hardware';
+  providerSid?: string;
+  forwardingWebhook?: string;
+  autoExtractOtp: boolean;
+  messageCount: number;
+  createdAt: string;
+  lastActivityAt?: string;
+}
+
+export interface BurnerSmsMessage {
+  id: string;
+  numberId: string;
+  e164: string;
+  direction: 'INBOUND' | 'OUTBOUND';
+  from: string;
+  to: string;
+  body: string;
+  otpCode: string | null;
+  extractedUrls: string[];
+  simIccid?: string;
+  provider?: 'local-matrix' | 'twilio' | 'telnyx' | 'termux-hardware';
+  providerSid?: string;
+  externalDeliveryStatus?: string;
+  read: boolean;
+  createdAt: string;
+}
+
+export interface BurnerVoiceCall {
+  id: string;
+  numberId: string;
+  e164: string;
+  direction: 'INBOUND' | 'OUTBOUND';
+  remoteParty: string;
+  durationSec: number;
+  dtmfDigits?: string;
+  transcript?: string;
+  provider?: 'local-matrix' | 'twilio' | 'telnyx' | 'termux-hardware';
+  providerSid?: string;
+  status: 'COMPLETED' | 'ACTIVE' | 'MISSED';
+  createdAt: string;
+}
+
+export interface CarrierBridgeStatus {
+  twilioConfigured: boolean;
+  twilioSuperSimConfigured: boolean;
+  telnyxConfigured: boolean;
+  telnyxEsimConfigured: boolean;
+  termuxTelephonyAvailable: boolean;
+  termuxSmsAvailable: boolean;
+  webhookUrls: {
+    twilioSms: string;
+    telnyxSms: string;
+  };
+}
 

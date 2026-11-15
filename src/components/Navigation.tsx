@@ -36,7 +36,8 @@ import {
   Network,
   Wrench,
   Download,
-  Key
+  Key,
+  Phone
 } from 'lucide-react';
 import type { ModuleType } from '../types';
 
@@ -306,6 +307,15 @@ export const Navigation: React.FC<NavigationProps> = ({
       description: 'Disposable temporary email inboxes with zero tracking'
     },
     {
+      id: 'infinite-sim',
+      label: 'Infinite-SIM & Burners',
+      category: 'command',
+      icon: Phone,
+      accentColor: 'text-emerald-400',
+      activeBg: 'bg-emerald-500/15 border-emerald-500/40 text-emerald-200',
+      description: 'Unlimited virtual eSIM cards, Luhn ICCIDs, LPA activation & infinite burner phone numbers with SMS/OTP routing'
+    },
+    {
       id: 'functions',
       label: 'Function Deck',
       category: 'command',
@@ -516,7 +526,7 @@ export const Navigation: React.FC<NavigationProps> = ({
   ];
 
   // Primary fast hubs pinned in the sleek desktop bar
-  const primaryHubIds: ModuleType[] = ['chat', 'api-secrets', 'knowledge-graph', 'tool-shed', 'universal-installer', 'browser', 'termux', 'image', 'drive', 'projects', 'download-models'];
+  const primaryHubIds: ModuleType[] = ['chat', 'infinite-sim', 'burner-mail', 'api-secrets', 'knowledge-graph', 'tool-shed', 'universal-installer', 'browser', 'termux', 'image', 'drive', 'projects', 'download-models'];
   const primaryHubs = primaryHubIds.map(id => allTabs.find(t => t.id === id)!).filter(Boolean);
 
   const filteredModalTabs = allTabs.filter(tab => {

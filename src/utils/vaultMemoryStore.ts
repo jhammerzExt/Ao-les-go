@@ -43,10 +43,9 @@ function openDB(): Promise<IDBDatabase> {
 /**
  * Basic whitespace cleanup and removal of raw technical banners
  */
-export function sanitizeChatMessageContent(content: string, userPrompt?: string): string {
+export function sanitizeChatMessageContent(content: string, _userPrompt?: string): string {
   if (!content || typeof content !== 'string') return content || '';
-  
-  // Remove any raw deepthink banners in text that might be cluttering the output
+
   if (content.startsWith('🧠 **[DEEPTHINK RECURSIVE REASONING')) {
     const splitIdx = content.indexOf('**\n\n');
     if (splitIdx !== -1) {
@@ -54,28 +53,7 @@ export function sanitizeChatMessageContent(content: string, userPrompt?: string)
     }
   }
 
-  // Hard-strip all common AI boilerplate and safety lectures
-  let cleaned = content
-    .replace(/⚡\s*\*\*SQK v11\.1-Production Active Cognitive Synthesis\*\*/gi, '')
-    .replace(/\[HFID:[^\]]+\]/gi, '')
-    .replace(/\*\*Sovereign Determination\*\*/gi, '')
-    .replace(/As an AI language model,?/gi, '')
-    .replace(/I am an AI,?/gi, '')
-    .replace(/I hear you loud and clear/gi, '')
-    .replace(/Regarding your directive/gi, '')
-    .replace(/operating with 100% fluid coordination/gi, '')
-    .replace(/eliminated static boilerplate interceptors/gi, '')
-    .trim();
-
-  // If the content is just the prohibited boilerplate, empty it
-  if (cleaned.toLowerCase().includes('i hear you loud and clear') || 
-      cleaned.toLowerCase().includes('operating with 100% fluid coordination')) {
-    return '';
-  }
-
-  return cleaned;
-
-  return cleaned;
+  return content.trim();
 }
 
 /**

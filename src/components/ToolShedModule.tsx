@@ -411,6 +411,35 @@ export const ToolShedModule: React.FC<ToolShedModuleProps> = ({
     localStorage.setItem('aurelius_micro_tools_v6', JSON.stringify(tools));
   }, [tools]);
 
+  useEffect(() => {
+    let mounted = true;
+    fetch('/api/agents/tools')
+      .then(r => r.json())
+      .then(data => {
+        if (!mounted || !data?.success || !Array.isArray(data.tools)) return;
+        const serverTools: MicroTool[] = data.tools.map((t: any) => ({
+          id: t.id,
+          name: t.name,
+          description: t.description || '',
+          language: 'javascript',
+          category: (t.category || 'utility').toLowerCase(),
+          endpoint: '/api/agents/tools/execute',
+          code: t.code || 'return { status: "OK" };',
+          defaultInput: '{}',
+          author: t.authorAgent || 'Resident Coordinator',
+          usageCount: t.executionCount || 0,
+          createdAt: t.createdAt || new Date().toISOString()
+        }));
+        setTools(prev => {
+          const existingIds = new Set(prev.map(p => p.id));
+          const fresh = serverTools.filter(st => !existingIds.has(st.id));
+          return fresh.length > 0 ? [...fresh, ...prev] : prev;
+        });
+      })
+      .catch(() => {});
+    return () => { mounted = false; };
+  }, []);
+
   const selectedTool = tools.find(t => t.id === selectedToolId) || tools[0];
 
   useEffect(() => {
